@@ -10,16 +10,16 @@ The pipeline aligns reads to the H37Rv reference using bowtie2, BWA or minimap2 
 
 ## Documentation
 
-This page has all the info you need to get started, however additional (and more organised!) documentation is available [here](https://jodyphelan.github.io/TBProfiler/en/). We have also have some basic translations listed below. Please contact us if you would like to improve a translation or add a new one!
+This page has all the info you need to get started, however additional (and more organised!) documentation is available [here](https://jodyphelan.github.io/tb-profiler-docs/en/). We have also have some basic translations listed below. Please contact us if you would like to improve a translation or add a new one!
 
 Short readme
-* [EN](https://github.com/jodyphelan/TBProfiler/blob/master/README.md)
-* [FR](https://github.com/jodyphelan/TBProfiler/blob/master/docs/README-FR.md) ([@justicengom](https://github.com/justicengom))
+* [EN](https://github.com/jodyphelan/tb-profiler-docs/blob/master/README.md)
+* [FR](https://github.com/jodyphelan/tb-profiler-docs/blob/master/docs/README-FR.md) ([@justicengom](https://github.com/justicengom))
 
 In depth documentation
-* [EN](https://jodyphelan.github.io/TBProfiler/en/)
-* [PT](https://jodyphelan.github.io/TBProfiler/pt/) ([@emilyncosta](https://github.com/emilyncosta))
-* [FR](https://jodyphelan.github.io/TBProfiler/fr/) ([@justicengom](https://github.com/justicengom))
+* [EN](https://jodyphelan.github.io/tb-profiler-docs/en/)
+* [PT](https://jodyphelan.github.io/tb-profiler-docs/pt/) ([@emilyncosta](https://github.com/emilyncosta))
+* [FR](https://jodyphelan.github.io/tb-profiler-docs/fr/) ([@justicengom](https://github.com/justicengom))
 
 ## Keeping up to date
 TB-Profiler is under constant rapid development. If you plan to use the program in your work please make sure you are using the most up to date version! Similarly, the database is not static and is continuously being improved so make sure you are using the most latest version. If you use TB-Profiler in your work please state the version of both the tool and the database as they are developed independantly from each other.
@@ -96,6 +96,15 @@ tb-profiler profile -1 ERR1664619_1.fastq.gz -2 ERR1664619_2.fastq.gz -t 4 -p ER
 cat results/ERR1664619.results.txt
 ```
 
+#### Output format
+
+#### Text and CSV
+A `.json` formatted file will be produced by default for each sample you run and will be placed in a folder named `results`. This format is easy to load for software but is not very human-readable. There are also a number of optional formats which are intended to be interpreted by humans. Add `--txt` or `--csv` to your command to produce a tab-separated or csv-separated file containing most of the same information as in the `.json` file. You can also produce your own custom format report by supplying a template file written using the *jinja* templating language. You can do this by supplying your template using `--output_template /path/to/template`.
+
+#### Word (docx) output
+
+You can also create a docx output which is a versitile approach to create professional-looking reports that can include tables, images and anything you can do in Word. It works in a similar way by supplying a docx template with *jinja* variables that will be filled in using the sample data. To create the output run `--docx /path/to/template.docx`. An example template can be found [here](https://github.com/jodyphelan/tb-profiler-templates).
+
 #### Whole genome analysis
 
 By default, `tb-profiler` only analyses drug resistance candidate genes. It is also possible to perform variant calling across the whole genome using the `--call_whole_genome` argument. When this is enabled it is also possible to compare your sample to previous runs to find those which are close to your new sample. Close samples are found using a SNP distance cutoff which is enabled using the `--snp_dist` argument. Close samples are stored in the json output and are also found in the text report. Please note that the `--snp_dist` function is experimental and could produce unexpected results.
@@ -122,7 +131,7 @@ tb-profiler collate
 
 This will automatically create a number of colled result files from all the individual result files in the _result_ directory. If you would like to generate this file for a subset of the runs you can provide a list with the run sames using the `--samples` flag. The prefix for the output files is _tbprofiler_ by default but this can be changed with the `--prefix` flag.
 
-If `tb-profiler` has been run using the `--snp_dist` argument, the `collate` function will also generate a transmission graph in json format that can be visualised by dragging and dropping the file into [this site](https://jodyphelan.github.io/transmission-graph-viewer)
+If `tb-profiler` has been run using the `--snp_dist` argument, the `collate` function will also generate a transmission graph in json format that can be visualised by dragging and dropping the file into [this site](https://jodyphelan.github.io/tgv/)
 
 ### Writing your own summary scripts
 
@@ -136,7 +145,7 @@ If you would like to use an altered database you can download the tbdb repo, mak
 
 ```text
 tb-profiler create_db --prefix <new_library_name>
-tb-profiler load_library --prefix <new_library_name>
+tb-profiler load_library <new_library_name>
 ```
 
 ### Non-H37Rv databases
@@ -156,6 +165,11 @@ Several files are produced by the `tb-profile collate` function. Among these are
 *   Lineage
 *   Drug resistance classes \(Sensitive, RR-TB, HR-TB, MDR-TB, Pre-XDR-TB, XDR\)
 *   Drug resistance calls for individual drugs, were filled circles represent resistance.
+
+If you would like the ITOL config files to be generated add the `itol` argument to the `collate` function.
+```bash
+tb-profiler collate --itol
+```
 
 ![](https://github.com/jodyphelan/jodyphelan.github.io/raw/master/img/itol_example.png)
 

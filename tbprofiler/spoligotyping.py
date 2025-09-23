@@ -1,32 +1,40 @@
 import os
 import pathogenprofiler as pp
 import csv
+from .models import Spoligotype
+import logging
 
 def spoligotype(args):
+    if args.bam:
+        args.bam_file = args.bam
     if "bam_file" in vars(args) and args.bam_file:
         result = bam2spoligotype(args.bam_file,args.files_prefix,args.conf,threads=args.threads,max_mem=args.ram)
     elif args.read1:
         result = fq2spoligotype(r1=args.read1,r2=args.read2,files_prefix=args.files_prefix,conf=args.conf,threads=args.threads,max_mem=args.ram,kmer_counter=args.kmer_counter)
     elif args.fasta:
-        result = fa2spoligotype(args.fasta,args.files_prefix,args.conf,threads=args.threads,max_mem=args.ram,kmer_counter=args.kmer_counter)
+        result = fa2spoligotype(args.fasta,args.files_prefix,args.conf,threads=args.threads,max_mem=args.ram,counter=args.kmer_counter)
+    else:
+        logging.error("Please provide a valid input file")
+        quit(1)
     ann = get_spoligotype_annotation(result["octal"],args.conf['spoligotype_annotations'])
     result.update(ann)
-    return result
+
+    return Spoligotype(**result)
 
 def fa2spoligotype(fasta,files_prefix,conf,threads=1,max_mem=2,counter="kmc"):
-    fasta = pp.fasta(fasta)
-    kmers = fasta.get_kmer_counts(files_prefix,klen=25,threads=threads,max_mem=max_mem,kmer_counter=kmer_counter)
+    fasta = pp.Fasta(fasta)
+    kmers = fasta.get_kmer_counts(files_prefix,klen=25,threads=threads,max_mem=max_mem,counter=counter)
     counts = kmers.load_kmer_counts(conf['spoligotype_spacers'])
     binary,octal = counts2spoligotype(counts,cutoff=1)
-    return {"binary":binary,"octal":octal,"spacers":counts}
+    return {"binary":binary_to_unicode(binary),"octal":octal,"spacers":counts}
 
 
 def fq2spoligotype(r1,files_prefix,conf,r2=None,threads=1,max_mem=2,kmer_counter="kmc"):
-    fastq = pp.fastq(r1,r2)
+    fastq = pp.Fastq(r1,r2)
     kmers = fastq.get_kmer_counts(files_prefix,klen=25,threads=threads,max_mem=max_mem,counter=kmer_counter)
     counts = kmers.load_kmer_counts(conf['spoligotype_spacers'])
     binary,octal = counts2spoligotype(counts)
-    return {"binary":binary,"octal":octal,"spacers":counts}
+    return {"binary":binary_to_unicode(binary),"octal":octal,"spacers":counts}
 
 def bam2spoligotype(bamfile,files_prefix,conf,threads=1,max_mem=2):
     chrom = open(conf['bed']).readline().split()[0]
@@ -79,3 +87,5 @@ def counts2spoligotype(counts,cutoff=None):
 
     return binary_str,octal_str    
 
+def binary_to_unicode(binary):
+    return binary.replace('0','□').replace('1','■')

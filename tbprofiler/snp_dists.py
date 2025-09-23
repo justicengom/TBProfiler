@@ -1,155 +1,149 @@
-import quickle
-from pathogenprofiler import cmd_out,debug,infolog,errlog
+import pickle
+from pathogenprofiler import cmd_out
+import logging
 import os
 import json
 from .output import write_outputs
 from copy import copy
 import filelock
-from time import time
+import sqlite3
+from tqdm import tqdm
+from .consensus import get_consensus_vcf
+import argparse
+from .models import ProfileResult, LinkedSample
+from typing import List, Tuple
+from datetime import datetime
 
-def write_variant_set(vcf_file, prefix, exclude_bed, min_cov=10, min_freq=0.8):
+def extract_variant_set(vcf_file: str) -> Tuple[set,set]:
     ref_diffs = set()
     missing = set()
-    for l in cmd_out(f"bcftools view -V indels -T ^{exclude_bed} {vcf_file} | bcftools query -f '%POS[\t%GT:%AD]\n'"):
+    for l in cmd_out(f"bcftools view {vcf_file} | bcftools query -f '%POS[\t%GT]\n'"):
         if l[0]=="#": continue
         row = l.strip().split()
         pos = int(row[0])
-        gt,ad = row[1].split(":")
-        if ad==".": # delly
-            continue
+        gt = row[1]
         if gt==".": 
             missing.add(pos)
             continue
-        ad = [int(x) for x in ad.split(",")]
-        if sum(ad)<=min_cov:
-            missing.add(pos)
-            continue
-        adf = sorted([float(x/sum(ad)) for x in ad])
-        if adf[-1]<min_freq:
-            missing.add(pos)
-            continue
-        if gt=="1/1":
+        elif gt=="1":
             ref_diffs.add(int(pos))
+        else:
+            raise Exception("Unknown GT: %s" % gt)
 
-    filename = prefix + ".non_ref.qkl"
-    open(filename,"wb").write(quickle.dumps((ref_diffs,missing)))
-    return variant_set(filename)
+    return ref_diffs, missing
 
-class variant_set:
-    def __init__(self, filename):
-        self.filename = filename
-        self.diffs,self.missing = quickle.loads(open(filename,"rb").read())
+class DB:
+    """
+    Class for storing and searching for SNP differences between samples
     
-    def get_snp_dist(self, set_file):
-        other_diffs,other_missing = quickle.loads(open(set_file,"rb").read())
-        pairwise_dists = self.diffs.symmetric_difference(other_diffs)
-        pairwise_dists -= self.missing
-        pairwise_dists -= other_missing
-        return len(pairwise_dists)
-    def get_close_samples(self,dir,cutoff=20):
-        self.sample_dists = []
-        directory_files = [f for f in os.listdir(dir) if f.endswith(".qkl")]
-        infolog(f"Searching across {len(directory_files)} files")
-        for f in directory_files:
-            dist = self.get_snp_dist(os.path.join(dir,f))
-            self.sample_dists.append({
-                "sample":f.replace(".non_ref.qkl",""),
-                "distance":dist
-            })
-        return [x for x in self.sample_dists if x["distance"]<=cutoff]
+    Arguments
+    ---------
+    filename : str
+        Filename of the sqlite database to use
+    
+    Attributes
+    ----------
+    filename : str
+        Filename of the sqlite database to use
+    conn : sqlite3.Connection
+        Connection to the sqlite database
+    c : sqlite3.Cursor
+        Cursor to the sqlite database
+        
+    Methods
+    -------
+    store(result,vcf_file)
+        Store the SNP differences from a sample in the database
+    search(result,vcf_file,cutoff=20)
+        Search for samples with similar SNP differences in the database
+    """
+    def __init__(self, filename: str) -> None:
+        self.filename = filename
+        self.conn = sqlite3.connect(filename)
+        self.c = self.conn.cursor()
+        self.c.execute('''CREATE TABLE IF NOT EXISTS variants (sample text, lineage text, diffs binary, missing binary)''')
+    def store(self,result: ProfileResult, vcf_file: str) -> None:
+        sample_name = result.id
+        diffs,missing = extract_variant_set(vcf_file)
+        res = self.c.execute("SELECT sample FROM variants WHERE sample=?",(sample_name,)).fetchone()
+        if res:
+            self.c.execute("UPDATE variants SET lineage=?, diffs=?, missing=? WHERE sample=?",(result.sub_lineage, pickle.dumps(diffs), pickle.dumps(missing), sample_name))
+        else:
+            self.c.execute("INSERT INTO variants VALUES (?,?,?,?)",(sample_name, result.sub_lineage, pickle.dumps(diffs), pickle.dumps(missing)))
+        self.conn.commit()
+        self.diffs = diffs
+        self.missing = missing
+    def search(self,result: ProfileResult, vcf_file: str, cutoff: int = 20) -> List[LinkedSample]:
+        logging.info("Searching for close samples in %s" % self.filename)
+        start_timestamp = datetime.now()
+        self.c.execute("SELECT sample, diffs, missing FROM variants WHERE lineage=?",(result.sub_lineage,))
+        self.diffs,self.missing = extract_variant_set(vcf_file)
+        sample_dists = []
+        for s,d,m in tqdm(self.c.fetchall(),desc="Searching for close samples"):
+            dist = self.diffs.symmetric_difference(pickle.loads(d))
+            dist -= self.missing
+            dist -= pickle.loads(m) 
+            if (ld:=len(dist))<cutoff:
+                sample_dists.append(
+                    LinkedSample(
+                        sample = s,
+                        distance = ld,
+                        positions = list(dist)
+                    )
+                )
+        end_timestamp = datetime.now()
+        logging.info("Finished searching for close samples in %s. Took %s" % (self.filename,end_timestamp-start_timestamp))
+        logging.info("Found %s close samples" % len(sample_dists))
+        return sample_dists
 
-def read_json(filename):
-    debug("Reading %s" % filename)
-    lock = filelock.FileLock(filename + ".lock")
-    with lock:
-        data = json.load(open(filename))
-    debug("Finished reading %s" % filename)
-    return data
-
-def sample_in_json(sample,result_file):
-    results = read_json(result_file)
-    if sample in [d['sample'] for d in results['close_samples']]:
+def sample_in_linked_list(sample,result_file):
+    result = ProfileResult(**json.load(open(result_file)))
+    if sample in [d.sample for d in result.linked_samples]:
         return True
     else:
         return False
 
-def run_snp_dists(args,results):
-    infolog("\nCalculating SNP distances to look for closely related samples")
-    infolog("-------------------------------------------------------------")
-    t1 = time()
+def run_snp_dists(args: argparse.Namespace,result: ProfileResult) -> None:
+    logging.info("Calculating SNP distances to look for closely related samples")
     if args.vcf:
         wg_vcf = args.vcf
     else:
         wg_vcf = args.files_prefix + ".vcf.gz"
-    var_set = write_variant_set(wg_vcf,args.files_prefix,exclude_bed=args.conf['bedmask'])
-    results["close_samples"] = var_set.get_close_samples(os.path.join(args.dir,"results"),cutoff=args.snp_dist)
-    results["close_samples"] = [d for d in results["close_samples"] if d["sample"]!=results["id"]]
-    t2 = time()
-    dt = int(t2-t1)
-    infolog(f"\nFound {len(results['close_samples'])} close samples in {dt} seconds")
-    infolog("-------------------------------------------------------------\n")
-    # if args.nj:
-        # results['_tree'] = make_nj_tree(args,results)
+    input_vcf = get_consensus_vcf(args.prefix, wg_vcf,args)
+    logging.debug("Input VCF: %s" % input_vcf)
+    if args.snp_diff_db:
+        dbname = args.snp_diff_db
+    else:
+        dbname = f'{args.dir}/results/snp_diffs.db'
+    lock = f"{dbname}.lock"
+    with filelock.SoftFileLock(lock):
+        db = DB(dbname)
+        linked_samples = db.search(result,input_vcf,args.snp_dist)
+        if not args.snp_diff_no_store:
+            db.store(result,input_vcf)
+        result.linked_samples = [d for d in linked_samples if d.sample!=result.id]
 
-def update_neighbour_snp_dist_output(args,results):
-    for s in results['close_samples']:
-        infolog("Close sample found: %s (%s). Updating result files" % (s['sample'],s['distance']))
-        f = os.path.join(args.dir,"results",f"{s['sample']}.results.json")
-        if not sample_in_json(args.prefix,f):
-            lock = filelock.FileLock(f + ".lock")
+
+
+def update_neighbour_snp_dist_output(args: argparse.Namespace,result: ProfileResult) -> None:
+    for s in result.linked_samples:
+        logging.debug("Close sample found: %s (%s). Updating result files" % (s.sample,s.distance))
+        f = os.path.join(args.dir,"results",f"{s.sample}.results.json")
+        if not os.path.exists(f):
+            continue
+        if not sample_in_linked_list(args.prefix,f):
+            lock = filelock.SoftFileLock(f + ".lock")
             with lock:
-                debug("Acquiring lock for %s" % f)
-                data = json.load(open(f))
-                data['close_samples'].append({
-                    "sample":args.prefix,
-                    "distance":s['distance']
-                })
+                logging.debug("Acquiring lock for %s" % f)
+                data = ProfileResult(**json.load(open(f)))
+                data.linked_samples.append(
+                    LinkedSample(
+                        sample = args.prefix,
+                        distance = s.distance,
+                        positions = s.positions
+                    )
+                )
                 temp_args = copy(args)
-                temp_args.prefix = s['sample']
-                # if args.nj:
-                    # results['_tree'] = make_nj_tree(temp_args,data)
-                write_outputs(temp_args,data,template_file=args.output_template)
-                debug("Finished with lock for %s" % f)
-
-# def make_nj_tree(args,results):
-    
-#     neighbours = [s['sample'] for s in results['close_samples']]
-#     if len(neighbours)<2:
-#         return None
-#     all_samps = neighbours + [results['id']]
-#     if len(neighbours)==0: return
-#     dist_dict = {}
-#     for d in results['close_samples']:
-#         dist_dict[(results['id'],d['sample'])] = d['distance']
-#         dist_dict[(d['sample'],results['id'])] = d['distance']
-#     for si in neighbours:
-#         data = read_json(os.path.join(args.dir,"results",f"{si}.results.json"))
-#         for d in data['close_samples']:
-#             sj = d['sample']
-#             if sj not in all_samps: continue
-#             dist_dict[(si,sj)] = d['distance']
-#             dist_dict[(sj,si)] = d['distance']
-#     dists = []
-
-#     for si in all_samps:
-#         row = []
-#         for sj in all_samps:
-#             if si==sj: 
-#                 row.append(0)
-#             elif (si,sj) in dist_dict:
-#                 row.append(dist_dict[(si,sj)])
-#             else:
-#                 si_set_file = os.path.join(args.dir,"results",f"{si}.non_ref.qkl")
-#                 sj_set_file = os.path.join(args.dir,"results",f"{sj}.non_ref.qkl")
-#                 si_set = variant_set(si_set_file)
-#                 d = si_set.get_snp_dist(sj_set_file)
-#                 row.append(d)
-#         dists.append(row)
-#     from skbio import DistanceMatrix
-#     from skbio.tree import nj
-#     dm = DistanceMatrix(dists, all_samps)
-#     tree = nj(dm)
-#     tree = tree.root_at_midpoint()
-#     return tree
-
-
+                temp_args.prefix = s.sample
+                write_outputs(temp_args,data,template_file=args.text_template)
+                logging.debug("Finished with lock for %s" % f)
